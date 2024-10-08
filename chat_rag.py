@@ -196,14 +196,25 @@ def serve_fasthtml():
     emb_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
 
     # Initialize FastHTML app
-    fasthtml_app, rt = fast_app(ws_hdr=True)
+    fasthtml_app, rt = fast_app(
+        hdrs=(
+            Script(src="https://cdn.tailwindcss.com"),
+            Link(rel="stylesheet", href="https://cdn.jsdelivr.net/npm/daisyui@4.11.1/dist/full.min.css")
+        ),
+        ws_hdr=True
+    )
+
 
     @rt("/")
     async def get():
         return Div(
-            H1("Chat with Irish English translator and tutor bot"),
+            H1(
+                "Chat with Agony Aunt",
+                cls="text-3xl font-bold mb-4 text-white"
+            ),
             chat(),
-            cls="flex flex-col items-center min-h-screen bg-red-100",
+            cls="flex flex-col items-center min-h-screen",
+            style="background-color: rgb(54, 54, 54); color: white;"
         )
 
     @fasthtml_app.ws("/ws")
@@ -226,12 +237,12 @@ def serve_fasthtml():
         context = "\n\n".join(retrieved_docs)
 
         # Create prompt for the language model
-        system_prompt = "You are a helpful Irish English translator and tutor. Respond concisely and stay on topic."
+        system_prompt = "You are an agony aunts who help individuals clarify their options and think through their choices, providing reassurance and objectivity that close friends may not offer. Explain how they avoid acting as moral judges, recognizing that life isn't black and white but shades of grey."
         prompt = f"{system_prompt}\n\nContext:\n{context}\n\nHuman: {msg}\n\nAssistant:"
 
         # Send prompt to vLLM server
         vllm_url = f"https://{USERNAME}--{APP_NAME}-serve-vllm.modal.run/v1/completions"
-        params = {"prompt": prompt, "max_tokens": 100, "stream": True}
+        params = {"prompt": prompt, "max_tokens": 1000, "stream": True}
         response = requests.get(vllm_url, params=params, stream=True)
 
         if response.status_code == 200:
