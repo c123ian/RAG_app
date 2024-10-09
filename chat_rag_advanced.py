@@ -1,5 +1,4 @@
 from components.assets import arrow_circle_icon, github_icon
-from components.assets import arrow_circle_icon, github_icon
 from components.chat import chat, chat_form, chat_message, chat_messages
 import asyncio
 import modal
@@ -45,8 +44,8 @@ app = modal.App(APP_NAME)
 # vLLM server implementation with model path handling
 @app.function(
     image=image,
-    gpu=modal.gpu.L4(count=1),
-    # gpu=modal.gpu.A100(count=1, size="40GB"),
+    # gpu=modal.gpu.L4(count=1),
+    gpu=modal.gpu.A100(count=1, size="40GB"),
     container_idle_timeout=10 * 60,
     timeout=24 * 60 * 60,
     allow_concurrent_inputs=100,
@@ -125,7 +124,7 @@ def serve_vllm():
     )
 
     @web_app.get("/v1/completions")
-    async def get_completions(prompt: str, max_tokens: int = 1000, stream: bool = False):
+    async def get_completions(prompt: str, max_tokens: int = 100, stream: bool = False):
         request_id = str(uuid.uuid4())
         sampling_params = SamplingParams(
             max_tokens=max_tokens,
@@ -214,6 +213,12 @@ def serve_fasthtml():
                 cls="text-3xl font-bold mb-4 text-white"
             ),
             chat(),
+            # Model status indicator
+            Div(
+                Span("Model status: "),
+                Span("⚫", id="model-status-emoji"),
+                cls="model-status text-white mt-4"
+            ),
             Div(id="top-sources"),  # Placeholder for Top Sources
             cls="flex flex-col items-center min-h-screen bg-black",
         )
@@ -240,7 +245,7 @@ def serve_fasthtml():
                             ),
                             href=source['url'],
                             target="_blank",
-                            cls="justify-between items-center pl-2 pr-1 flex border border-green-500 w-40 rounded-md group",
+                            cls="justify-between items-center pl-2 pr-1 flex border border-green-500 w-48 rounded-md group",
                         )
                         for source in top_sources
                     ],
@@ -253,6 +258,38 @@ def serve_fasthtml():
 
     @fasthtml_app.ws("/ws")
     async def ws(msg: str, send):
+        response_received = asyncio.Event()  # Event to indicate if response has been received
+
+        async def update_model_status():
+            # Wait for 3 seconds
+            await asyncio.sleep(3)
+            if not response_received.is_set():
+                # Start switching between ⚫ and 🟡 every second
+                for _ in range(15):  # 15 times * 2 seconds = 30 seconds
+                    if response_received.is_set():
+                        break
+                    # Toggle to 🟡
+                    await send(Span("🟡", id="model-status-emoji", hx_swap_oob="innerHTML"))
+                    await asyncio.sleep(1)
+                    if response_received.is_set():
+                        break
+                    # Toggle to ⚫
+                    await send(Span("⚫", id="model-status-emoji", hx_swap_oob="innerHTML"))
+                    await asyncio.sleep(1)
+                else:
+                    # After 30 seconds, set status to 🔴 if no response
+                    if not response_received.is_set():
+                        await send(Span("🔴", id="model-status-emoji", hx_swap_oob="innerHTML"))
+            if response_received.is_set():
+                # Set status to 🟢
+                await send(Span("🟢", id="model-status-emoji", hx_swap_oob="innerHTML"))
+                # Wait for 10 minutes, then set back to ⚫
+                await asyncio.sleep(600)
+                await send(Span("⚫", id="model-status-emoji", hx_swap_oob="innerHTML"))
+
+        # Start the update_model_status coroutine
+        asyncio.create_task(update_model_status())
+
         # Add user's message to chat history
         chat_messages.append({"role": "user", "content": msg})
         await send(chat_form(disabled=True))
@@ -277,9 +314,27 @@ def serve_fasthtml():
         # Construct context from retrieved documents
         context = "\n\n".join(retrieved_docs)
 
+        # Build conversation history (limit to last N messages to stay within context window)
+        def build_conversation(chat_messages, max_length=2000):
+            conversation = ''
+            total_length = 0
+            # Start from the latest messages
+            for message in reversed(chat_messages):
+                role = message['role']
+                content = message['content']
+                message_text = f"{role.capitalize()}: {content}\n"
+                total_length += len(message_text)
+                if total_length > max_length:
+                    break
+                conversation = message_text + conversation
+            return conversation
+
+        conversation_history = build_conversation(chat_messages)
+
         # Create prompt for the language model
         system_prompt = "You are an agony aunt who helps individuals clarify their options and think through their choices, providing reassurance and objectivity that close friends may not offer. Avoid acting as moral judges, recognizing that life isn't black and white but shades of grey."
-        prompt = f"{system_prompt}\n\nContext:\n{context}\n\nHuman: {msg}\n\nAssistant:"
+
+        prompt = f"{system_prompt}\n\nContext:\n{context}\n\nConversation:\n{conversation_history}\nAssistant:"
 
         # Send prompt to vLLM server
         vllm_url = f"https://{USERNAME}--{APP_NAME}-serve-vllm.modal.run/v1/completions"
@@ -287,6 +342,9 @@ def serve_fasthtml():
         response = requests.get(vllm_url, params=params, stream=True)
 
         if response.status_code == 200:
+            # Indicate that response has been received
+            response_received.set()
+
             # Add assistant's response to chat history
             chat_messages.append({"role": "assistant", "content": ""})
             message_index = len(chat_messages) - 1
